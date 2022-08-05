@@ -23,6 +23,7 @@ if transformers.__version__.startswith("4"):
     from transformers import AdamW
     from transformers import BertTokenizer
     from transformers import RobertaTokenizer
+    from transformers import VisualBertModel, VisualBertConfig
 else:
     from transformers.modeling_bert import BertConfig, BertModel
     from transformers.optimization import AdamW
@@ -36,24 +37,61 @@ from .reader import Reader
 logger = logging.getLogger(__name__)
 
 
+# def get_bert_biencoder_components(cfg, inference_only: bool = False, **kwargs):
+#     dropout = cfg.encoder.dropout if hasattr(cfg.encoder, "dropout") else 0.0
+#     question_encoder = HFBertEncoder.init_encoder(
+#         cfg.encoder.pretrained_model_cfg,
+#         projection_dim=cfg.encoder.projection_dim,
+#         dropout=dropout,
+#         pretrained=cfg.encoder.pretrained,
+#         **kwargs
+#     )
+#     ctx_encoder = HFBertEncoder.init_encoder(
+#         cfg.encoder.pretrained_model_cfg,
+#         projection_dim=cfg.encoder.projection_dim,
+#         dropout=dropout,
+#         pretrained=cfg.encoder.pretrained,
+#         **kwargs
+#     )
+
+#     fix_ctx_encoder = cfg.encoder.fix_ctx_encoder if hasattr(cfg.encoder, "fix_ctx_encoder") else False
+#     biencoder = BiEncoder(question_encoder, ctx_encoder, fix_ctx_encoder=fix_ctx_encoder)
+
+#     optimizer = (
+#         get_optimizer(
+#             biencoder,
+#             learning_rate=cfg.train.learning_rate,
+#             adam_eps=cfg.train.adam_eps,
+#             weight_decay=cfg.train.weight_decay,
+#         )
+#         if not inference_only
+#         else None
+#     )
+
+#     tensorizer = get_bert_tensorizer(cfg)
+#     return tensorizer, biencoder, optimizer
+
+
 def get_bert_biencoder_components(cfg, inference_only: bool = False, **kwargs):
-    dropout = cfg.encoder.dropout if hasattr(cfg.encoder, "dropout") else 0.0
-    question_encoder = HFBertEncoder.init_encoder(
-        cfg.encoder.pretrained_model_cfg,
-        projection_dim=cfg.encoder.projection_dim,
+    main_encoder = cfg.ctx_encoder
+    dropout = main_encoder.dropout if hasattr(main_encoder, "dropout") else 0.0
+    print(cfg.qn_encoder)
+    ctx_encoder = HFBertEncoder.init_encoder(
+        cfg.ctx_encoder.pretrained_model_cfg,
+        projection_dim=cfg.ctx_encoder.projection_dim,
         dropout=dropout,
-        pretrained=cfg.encoder.pretrained,
+        pretrained=cfg.ctx_encoder.pretrained,
         **kwargs
     )
-    ctx_encoder = HFBertEncoder.init_encoder(
-        cfg.encoder.pretrained_model_cfg,
-        projection_dim=cfg.encoder.projection_dim,
+    question_encoder = HFVisualBERTEncoder.init_encoder(
+        cfg.qn_encoder.pretrained_model_cfg,
+        projection_dim=cfg.qn_encoder.projection_dim,
         dropout=dropout,
-        pretrained=cfg.encoder.pretrained,
+        pretrained=cfg.qn_encoder.pretrained,
         **kwargs
     )
 
-    fix_ctx_encoder = cfg.encoder.fix_ctx_encoder if hasattr(cfg.encoder, "fix_ctx_encoder") else False
+    fix_ctx_encoder = main_encoder.fix_ctx_encoder if hasattr(main_encoder, "fix_ctx_encoder") else False
     biencoder = BiEncoder(question_encoder, ctx_encoder, fix_ctx_encoder=fix_ctx_encoder)
 
     optimizer = (
@@ -101,8 +139,9 @@ def get_bert_reader_components(cfg, inference_only: bool = False, **kwargs):
 
 # TODO: unify tensorizer init methods
 def get_bert_tensorizer(cfg):
-    sequence_length = cfg.encoder.sequence_length
-    pretrained_model_cfg = cfg.encoder.pretrained_model_cfg
+    main_encoder = cfg.ctx_encoder # TODO: temporary using ctx_encoder as main_encoder
+    sequence_length = main_encoder.sequence_length
+    pretrained_model_cfg = main_encoder.pretrained_model_cfg
     tokenizer = get_bert_tokenizer(pretrained_model_cfg, do_lower_case=cfg.do_lower_case)
     if cfg.special_tokens:
         _add_special_tokens(tokenizer, cfg.special_tokens)
@@ -236,6 +275,95 @@ class HFBertEncoder(BertModel):
         if transformers.__version__.startswith("4") and isinstance(
             out,
             transformers.modeling_outputs.BaseModelOutputWithPoolingAndCrossAttentions,
+        ):
+            sequence_output = out.last_hidden_state
+            pooled_output = None
+            hidden_states = out.hidden_states
+
+        elif self.config.output_hidden_states:
+            sequence_output, pooled_output, hidden_states = out
+        else:
+            hidden_states = None
+            out = super().forward(
+                input_ids=input_ids,
+                token_type_ids=token_type_ids,
+                attention_mask=attention_mask,
+            )
+            sequence_output, pooled_output = out
+
+        if isinstance(representation_token_pos, int):
+            pooled_output = sequence_output[:, representation_token_pos, :]
+        else:  # treat as a tensor
+            bsz = sequence_output.size(0)
+            assert representation_token_pos.size(0) == bsz, "query bsz={} while representation_token_pos bsz={}".format(
+                bsz, representation_token_pos.size(0)
+            )
+            pooled_output = torch.stack([sequence_output[i, representation_token_pos[i, 1], :] for i in range(bsz)])
+
+        if self.encode_proj:
+            pooled_output = self.encode_proj(pooled_output)
+        return sequence_output, pooled_output, hidden_states
+
+    # TODO: make a super class for all encoders
+    def get_out_size(self):
+        if self.encode_proj:
+            return self.encode_proj.out_features
+        return self.config.hidden_size
+
+class HFVisualBERTEncoder(VisualBertModel):
+    def __init__(self, config, project_dim: int = 0):
+        VisualBertModel.__init__(self, config)
+        assert config.hidden_size > 0, "Encoder hidden_size can't be zero"
+        self.encode_proj = nn.Linear(config.hidden_size, project_dim) if project_dim != 0 else None
+        self.init_weights()
+
+    @classmethod
+    def init_encoder(
+        cls, cfg_name: str, projection_dim: int = 0, dropout: float = 0.1, pretrained: bool = True, **kwargs
+    ) -> VisualBertModel:
+        logger.info("Initializing HF VisualBERT Encoder. cfg_name=%s", cfg_name)
+        cfg = VisualBertConfig.from_pretrained(cfg_name if cfg_name else "uclanlp/visualbert-vqa-coco-pre")
+        if dropout != 0:
+            cfg.attention_probs_dropout_prob = dropout
+            cfg.hidden_dropout_prob = dropout
+
+        if pretrained:
+            return cls.from_pretrained(cfg_name, config=cfg, project_dim=projection_dim, **kwargs)
+        else:
+            return HFVisualBERTEncoder(cfg, project_dim=projection_dim)
+
+    def forward(
+        self,
+        visual_embeds: T,
+        input_ids: T,
+        token_type_ids: T,
+        attention_mask: T,
+        representation_token_pos=0,
+    ) -> Tuple[T, ...]:
+
+        # TODO: Shift this into Data Preparation
+        visual_token_type_ids = torch.ones(visual_embeds.shape[:-1], dtype=torch.long).cuda()
+        visual_attention_mask = torch.ones(visual_embeds.shape[:-1], dtype=torch.float).cuda()
+
+        # print(visual_embeds.shape)
+        # print(attention_mask.shape)
+        # print(visual_attention_mask.shape)
+        # print(input_ids.shape)
+
+        out = super().forward(
+            visual_embeds=visual_embeds,
+            visual_token_type_ids=visual_token_type_ids,
+            visual_attention_mask=visual_attention_mask,
+            input_ids=input_ids,
+            token_type_ids=token_type_ids,
+            attention_mask=attention_mask,
+        )
+
+        # HF >4.0 version support
+        print(type(out))
+        if transformers.__version__.startswith("4") and isinstance(
+            out,
+            transformers.modeling_outputs.BaseModelOutputWithPooling,
         ):
             sequence_output = out.last_hidden_state
             pooled_output = None

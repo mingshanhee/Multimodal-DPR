@@ -23,6 +23,8 @@ from omegaconf import DictConfig
 from torch import Tensor as T
 from typing import List, Iterator, Callable, Tuple
 
+import numpy as np
+
 logger = logging.getLogger()
 
 
@@ -46,6 +48,17 @@ def read_data_from_json_files(paths: List[str]) -> List:
             data = json.load(f)
             results.extend(data)
             logger.info("Aggregated data size: {}".format(len(results)))
+    return results
+
+def read_feature_data(img_ids: List) -> List:
+    results = {}
+    logger.info("Reading feature files")
+    for i, idx in enumerate(img_ids):
+        filename = idx.replace(".png", ".npy")
+        path = f"/opt/datasets/mmf/datasets/hateful_memes/defaults/features/clean/{filename}"
+        results[idx] = np.load(path)
+    
+    logger.info("Aggregated feature matrixes: {}".format(len(results)))
     return results
 
 

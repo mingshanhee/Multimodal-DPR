@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 BiEncoderBatch = collections.namedtuple(
     "BiENcoderInput",
     [
+        "visual_embeds",
         "question_ids",
         "question_segments",
         "context_ids",
@@ -110,8 +111,47 @@ class BiEncoder(nn.Module):
 
         return sequence_output, pooled_output, hidden_states
 
+    @staticmethod
+    def get_qn_representation(
+        sub_model: nn.Module,
+        visual_embeds: T,
+        ids: T,
+        segments: T,
+        attn_mask: T,
+        fix_encoder: bool = False,
+        representation_token_pos=0,
+    ) -> (T, T, T):
+        sequence_output = None
+        pooled_output = None
+        hidden_states = None
+        if ids is not None:
+            if fix_encoder:
+                with torch.no_grad():
+                    sequence_output, pooled_output, hidden_states = sub_model(
+                        visual_embeds,
+                        ids,
+                        segments,
+                        attn_mask,
+                        representation_token_pos=representation_token_pos,
+                    )
+
+                if sub_model.training:
+                    sequence_output.requires_grad_(requires_grad=True)
+                    pooled_output.requires_grad_(requires_grad=True)
+            else:
+                sequence_output, pooled_output, hidden_states = sub_model(
+                    visual_embeds,
+                    ids,
+                    segments,
+                    attn_mask,
+                    representation_token_pos=representation_token_pos,
+                )
+
+        return sequence_output, pooled_output, hidden_states
+
     def forward(
         self,
+        visual_embeds: T,
         question_ids: T,
         question_segments: T,
         question_attn_mask: T,
@@ -122,8 +162,9 @@ class BiEncoder(nn.Module):
         representation_token_pos=0,
     ) -> Tuple[T, T]:
         q_encoder = self.question_model if encoder_type is None or encoder_type == "question" else self.ctx_model
-        _q_seq, q_pooled_out, _q_hidden = self.get_representation(
+        _q_seq, q_pooled_out, _q_hidden = self.get_qn_representation(
             q_encoder,
+            visual_embeds,
             question_ids,
             question_segments,
             question_attn_mask,
@@ -161,6 +202,7 @@ class BiEncoder(nn.Module):
         :param shuffle_positives: shuffles positive passages pools
         :return: BiEncoderBatch tuple
         """
+        visual_embeds_tensors = []
         question_tensors = []
         ctx_tensors = []
         positive_ctx_indices = []
@@ -224,13 +266,17 @@ class BiEncoder(nn.Module):
             else:
                 question_tensors.append(tensorizer.text_to_tensor(question))
 
+            visual_embeds_tensors.append(torch.from_numpy(sample.visual_embeds).unsqueeze(0))
+
         ctxs_tensor = torch.cat([ctx.view(1, -1) for ctx in ctx_tensors], dim=0)
         questions_tensor = torch.cat([q.view(1, -1) for q in question_tensors], dim=0)
+        visual_embeds_tensor = torch.cat(visual_embeds_tensors, dim=0)
 
         ctx_segments = torch.zeros_like(ctxs_tensor)
         question_segments = torch.zeros_like(questions_tensor)
 
         return BiEncoderBatch(
+            visual_embeds_tensor,
             questions_tensor,
             question_segments,
             ctxs_tensor,

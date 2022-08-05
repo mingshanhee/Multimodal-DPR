@@ -76,7 +76,7 @@ class BiEncoderTrainer(object):
             saved_state = load_states_from_checkpoint(model_file)
             set_cfg_params_from_state(saved_state.encoder_params, cfg)
 
-        tensorizer, model, optimizer = init_biencoder_components(cfg.encoder.encoder_model_type, cfg)
+        tensorizer, model, optimizer = init_biencoder_components(cfg.ctx_encoder.encoder_model_type, cfg)
 
         model, optimizer = setup_for_distributed_mode(
             model,
@@ -164,6 +164,10 @@ class BiEncoderTrainer(object):
         updates_per_epoch = train_iterator.max_iterations // cfg.train.gradient_accumulation_steps
 
         total_updates = updates_per_epoch * cfg.train.num_train_epochs
+        logger.info(" Updates per epochs=%d", updates_per_epoch)
+        logger.info(" Num train epoches=%d", cfg.train.num_train_epochs)
+        logger.info(" Batch size=%d", cfg.train.batch_size)
+        logger.info(" Dev batch size=%d", cfg.train.dev_batch_size)
         logger.info(" Total updates=%d", total_updates)
         warmup_steps = cfg.train.warmup_steps
 
@@ -700,6 +704,7 @@ def _do_biencoder_fwd_pass(
 
     if model.training:
         model_out = model(
+            input.visual_embeds,
             input.question_ids,
             input.question_segments,
             q_attn_mask,
@@ -712,6 +717,7 @@ def _do_biencoder_fwd_pass(
     else:
         with torch.no_grad():
             model_out = model(
+                input.visual_embeds,
                 input.question_ids,
                 input.question_segments,
                 q_attn_mask,

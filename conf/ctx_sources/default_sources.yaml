@@ -4,3 +4,8 @@ dpr_wiki:
   _target_: dpr.data.retriever_data.CsvCtxSrc
   file: data.wikipedia_split.psgs_w100
   id_prefix: 'wiki:'
+
+fhm:
+  _target_: dpr.data.retriever_data.JsonCtxSrc
+  file: /opt/mshee/multimodal-dpr/DPR/mem/mem_test_reasonings.json
+  id_prefix: 'fhm:'

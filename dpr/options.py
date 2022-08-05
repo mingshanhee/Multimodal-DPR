@@ -67,7 +67,8 @@ def get_encoder_params_state_from_cfg(cfg: DictConfig):
     """
     return {
         "do_lower_case": cfg.do_lower_case,
-        "encoder": cfg.encoder,
+        "qn_encoder": cfg.qn_encoder,
+        "ctx_encoder": cfg.ctx_encoder,
     }
 
 

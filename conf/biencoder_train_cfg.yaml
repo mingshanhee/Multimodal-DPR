@@ -1,7 +1,8 @@
 
 # configuration groups
 defaults:
-  - encoder: hf_bert
+  - qn_encoder: hf_visualbert
+  - ctx_encoder: hf_bert
   - train: biencoder_default
   - datasets: encoder_train_default
 
